@@ -58,7 +58,7 @@ def process_properties(properties, required_fields, openapi_spec):
             is_required = prop_name in required_fields
             is_array = yaml_type == "array"
 
-            # Handle array types with nested items
+            # Handle array types with nested items, including references
             if is_array:
                 items = prop_details.get('items', {})
                 if '$ref' in items:
@@ -69,11 +69,13 @@ def process_properties(properties, required_fields, openapi_spec):
                     item_type = yaml_type_to_xsd_type(items.get('type', 'string'))
                     sequence.append(create_xsd_element(prop_name, element_type=item_type, required=is_required, is_array=True))
 
-            # Handle nested objects
+            # Handle nested objects, including cases where nested objects have references
             elif yaml_type == 'object':
-                nested_complex_type = process_properties(prop_details.get('properties', {}), prop_details.get('required', []), openapi_spec)
+                nested_properties = prop_details.get('properties', {})
+                nested_required = prop_details.get('required', [])
+                nested_complex_type = process_properties(nested_properties, nested_required, openapi_spec)
                 sequence.append(create_xsd_element(prop_name, complex_type=nested_complex_type, required=is_required))
-            
+
             # Handle simple types
             else:
                 xsd_type = yaml_type_to_xsd_type(yaml_type)
