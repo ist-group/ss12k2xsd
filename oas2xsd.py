@@ -90,12 +90,7 @@ def process_properties(properties, required_fields, references, openapi_spec):
             nested_complex_type = process_properties(merged_properties, merged_required, merged_references, openapi_spec)
             sequence.append(create_xsd_element(prop_name, complex_type=nested_complex_type, required=True))
         elif 'anyOf' in prop_details:
-            choice_type = ET.Element('xs:choice')
-            for option in prop_details['anyOf']:
-                ref_properties, _ = process_ref_or_schema(option, openapi_spec)
-                nested_complex_type = process_properties(ref_properties, [], [], openapi_spec)
-                choice_type.append(ET.Element('xs:element', type="xs:anyType") if not nested_complex_type else nested_complex_type)
-            sequence.append(create_xsd_element(prop_name, complex_type=choice_type, required=True))
+            process_any_of(prop_name, prop_details, sequence, openapi_spec)
         elif '$ref' in prop_details:
             ref_name = prop_details['$ref'].split('/')[-1]
             sequence.append(ET.Element('xs:element', ref=ref_name))
@@ -103,6 +98,20 @@ def process_properties(properties, required_fields, references, openapi_spec):
             process_simple_type(prop_name, prop_details, sequence, required_fields, openapi_spec)
 
     return complex_type
+
+def process_any_of(prop_name, prop_details, sequence, openapi_spec):
+    """Process anyOf construct in OpenAPI properties."""
+    choice_element = ET.Element('xs:choice')
+    for option in prop_details['anyOf']:
+        if '$ref' in option:
+            ref_name = option['$ref'].split('/')[-1]
+            choice_element.append(ET.Element('xs:element', ref=ref_name))
+        else:
+            yaml_type = option.get('type', 'string')
+            xsd_type = yaml_type_to_xsd_type(yaml_type)
+            choice_element.append(ET.Element('xs:element', type=xsd_type))
+
+    sequence.append(create_xsd_element(prop_name, complex_type=choice_element, required=True))
 
 def process_simple_type(prop_name, prop_details, sequence, required_fields, openapi_spec):
     """Process simple types, enums, and arrays in OpenAPI properties."""
