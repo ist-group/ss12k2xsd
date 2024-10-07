@@ -131,7 +131,8 @@ def process_simple_type(prop_name, prop_details, sequence, required_fields, open
             sequence.append(create_xsd_element(prop_name, is_array=True, required=is_required, complex_type=simple_type))
         elif '$ref' in items:
             ref_name = items['$ref'].split('/')[-1]
-            sequence.append(create_xsd_element(prop_name, is_array=True, required=is_required, ref=f'{ref_name}'))
+            # Correctly handle arrays of references using the `ref` attribute and `maxOccurs="unbounded"`
+            sequence.append(ET.Element('xs:element', ref=ref_name, maxOccurs="unbounded"))
     elif yaml_type == 'object':
         nested_properties = prop_details.get('properties', {})
         nested_required = prop_details.get('required', [])
