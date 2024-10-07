@@ -14,7 +14,7 @@ def yaml_type_to_xsd_type(yaml_type):
     }
     return mapping.get(yaml_type, "xs:string")
 
-def create_xsd_element(element_name, element_type, required=False, is_array=False):
+def create_xsd_element(element_name, element_type=None, required=False, is_array=False, complex_type=None):
     """Create an XML Schema element."""
     elem = ET.Element('xs:element', name=element_name)
     
@@ -25,8 +25,13 @@ def create_xsd_element(element_name, element_type, required=False, is_array=Fals
         elem.set("minOccurs", "1")
     else:
         elem.set("minOccurs", "0")
-
-    elem.set('type', element_type)
+    
+    # Use the complexType if provided, otherwise set the type
+    if complex_type is not None:
+        elem.append(complex_type)
+    else:
+        elem.set('type', element_type)
+    
     return elem
 
 def process_properties(properties, required_fields):
@@ -38,15 +43,28 @@ def process_properties(properties, required_fields):
         yaml_type = prop_details.get('type', 'string')
         is_required = prop_name in required_fields
         is_array = yaml_type == "array"
-        
-        # Handle array types
+
+        # Handle array types with nested items
         if is_array:
             items = prop_details.get('items', {})
-            item_type = yaml_type_to_xsd_type(items.get('type', 'string'))
-            sequence.append(create_xsd_element(prop_name, item_type, required=is_required, is_array=True))
+            item_type = items.get('type', 'object')
+            
+            if item_type == 'object':
+                nested_complex_type = process_properties(items.get('properties', {}), items.get('required', []))
+                sequence.append(create_xsd_element(prop_name, is_array=True, required=is_required, complex_type=nested_complex_type))
+            else:
+                item_xsd_type = yaml_type_to_xsd_type(item_type)
+                sequence.append(create_xsd_element(prop_name, element_type=item_xsd_type, required=is_required, is_array=True))
+
+        # Handle nested objects
+        elif yaml_type == 'object':
+            nested_complex_type = process_properties(prop_details.get('properties', {}), prop_details.get('required', []))
+            sequence.append(create_xsd_element(prop_name, complex_type=nested_complex_type, required=is_required))
+        
+        # Handle simple types
         else:
             xsd_type = yaml_type_to_xsd_type(yaml_type)
-            sequence.append(create_xsd_element(prop_name, xsd_type, required=is_required))
+            sequence.append(create_xsd_element(prop_name, element_type=xsd_type, required=is_required))
     
     return complex_type
 
