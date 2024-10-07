@@ -42,17 +42,35 @@ def resolve_ref(ref_path, openapi_spec):
         ref_schema = ref_schema.get(part, {})
     return ref_schema
 
-def process_properties(properties, required_fields, openapi_spec):
+def process_properties(properties, required_fields, openapi_spec, visited_refs=None):
     """Create XSD complexType elements based on OpenAPI properties."""
+    if visited_refs is None:
+        visited_refs = set()
+
     complex_type = ET.Element('xs:complexType')
     sequence = ET.SubElement(complex_type, 'xs:sequence')
     
     for prop_name, prop_details in properties.items():
         # Handle the case where the property is a reference
         if '$ref' in prop_details:
-            ref_schema = resolve_ref(prop_details['$ref'], openapi_spec)
-            nested_complex_type = process_properties(ref_schema.get('properties', {}), ref_schema.get('required', []), openapi_spec)
+            ref_path = prop_details['$ref']
+
+            # Check for recursive reference
+            if ref_path in visited_refs:
+                # Create a placeholder element for recursive references
+                sequence.append(create_xsd_element(prop_name, element_type="xs:anyType", required=True))
+                continue
+
+            # Mark this reference as visited
+            visited_refs.add(ref_path)
+
+            # Resolve the reference and process it
+            ref_schema = resolve_ref(ref_path, openapi_spec)
+            nested_complex_type = process_properties(ref_schema.get('properties', {}), ref_schema.get('required', []), openapi_spec, visited_refs)
             sequence.append(create_xsd_element(prop_name, complex_type=nested_complex_type, required=True))
+
+            # Remove the reference from the visited set to allow other branches to reference it
+            visited_refs.remove(ref_path)
         else:
             yaml_type = prop_details.get('type', 'string')
             is_required = prop_name in required_fields
@@ -62,9 +80,19 @@ def process_properties(properties, required_fields, openapi_spec):
             if is_array:
                 items = prop_details.get('items', {})
                 if '$ref' in items:
-                    ref_schema = resolve_ref(items['$ref'], openapi_spec)
-                    nested_complex_type = process_properties(ref_schema.get('properties', {}), ref_schema.get('required', []), openapi_spec)
+                    ref_path = items['$ref']
+
+                    # Check for recursive reference in array items
+                    if ref_path in visited_refs:
+                        # Create a placeholder element for recursive references
+                        sequence.append(create_xsd_element(prop_name, element_type="xs:anyType", required=is_required, is_array=True))
+                        continue
+
+                    visited_refs.add(ref_path)
+                    ref_schema = resolve_ref(ref_path, openapi_spec)
+                    nested_complex_type = process_properties(ref_schema.get('properties', {}), ref_schema.get('required', []), openapi_spec, visited_refs)
                     sequence.append(create_xsd_element(prop_name, is_array=True, required=is_required, complex_type=nested_complex_type))
+                    visited_refs.remove(ref_path)
                 else:
                     item_type = yaml_type_to_xsd_type(items.get('type', 'string'))
                     sequence.append(create_xsd_element(prop_name, element_type=item_type, required=is_required, is_array=True))
@@ -73,7 +101,7 @@ def process_properties(properties, required_fields, openapi_spec):
             elif yaml_type == 'object':
                 nested_properties = prop_details.get('properties', {})
                 nested_required = prop_details.get('required', [])
-                nested_complex_type = process_properties(nested_properties, nested_required, openapi_spec)
+                nested_complex_type = process_properties(nested_properties, nested_required, openapi_spec, visited_refs)
                 sequence.append(create_xsd_element(prop_name, complex_type=nested_complex_type, required=is_required))
 
             # Handle simple types
