@@ -56,19 +56,19 @@ def merge_all_of_schemas(all_of_list, openapi_spec):
         # Handle $ref within allOf
         if '$ref' in schema:
             ref_schema = resolve_ref(schema['$ref'], openapi_spec)
-            if 'enum' in ref_schema and ref_schema.get('type') == 'string':
-                # Handle $ref that points to a string enum object
-                properties = {schema['$ref']: {'type': 'string', 'enum': ref_schema['enum']}}
-                required = []
+            if 'allOf' in ref_schema:
+                # Recursively handle allOf in the referenced schema
+                ref_properties, ref_required = merge_all_of_schemas(ref_schema['allOf'], openapi_spec)
             else:
-                properties = ref_schema.get('properties', {})
-                required = ref_schema.get('required', [])
+                ref_properties = ref_schema.get('properties', {})
+                ref_required = ref_schema.get('required', [])
+            merged_properties.update(ref_properties)
+            required_fields.extend(ref_required)
         else:
             properties = schema.get('properties', {})
             required = schema.get('required', [])
-        
-        merged_properties.update(properties)
-        required_fields.extend(required)
+            merged_properties.update(properties)
+            required_fields.extend(required)
     
     return merged_properties, list(set(required_fields))  # Remove duplicates from required fields
 
@@ -101,7 +101,12 @@ def process_properties(properties, required_fields, openapi_spec):
         # Handle the case where the property is a reference
         elif '$ref' in prop_details:
             ref_schema = resolve_ref(prop_details['$ref'], openapi_spec)
-            if 'enum' in ref_schema and ref_schema.get('type') == 'string':
+            if 'allOf' in ref_schema:
+                # Handle allOf in the referenced schema
+                merged_properties, merged_required = merge_all_of_schemas(ref_schema['allOf'], openapi_spec)
+                nested_complex_type = process_properties(merged_properties, merged_required, openapi_spec)
+                sequence.append(create_xsd_element(prop_name, complex_type=nested_complex_type, required=True))
+            elif 'enum' in ref_schema and ref_schema.get('type') == 'string':
                 # Handle $ref that points to a string enum object
                 enum_values = ref_schema['enum']
                 sequence.append(create_xsd_element(prop_name, element_type='xs:string', required=True, enum_values=enum_values))
