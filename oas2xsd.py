@@ -53,13 +53,18 @@ def merge_all_of_schemas(all_of_list, openapi_spec):
     """Merge multiple schemas defined in an allOf list into a single schema."""
     merged_properties = {}
     required_fields = []
+    references = []
 
     for schema in all_of_list:
-        ref_properties, ref_required = process_ref_or_schema(schema, openapi_spec)
-        merged_properties.update(ref_properties)
-        required_fields.extend(ref_required)
+        if '$ref' in schema:
+            ref_name = schema['$ref'].split('/')[-1]
+            references.append(ref_name)
+        else:
+            ref_properties, ref_required = process_ref_or_schema(schema, openapi_spec)
+            merged_properties.update(ref_properties)
+            required_fields.extend(ref_required)
 
-    return merged_properties, list(set(required_fields))  # Remove duplicates from required fields
+    return merged_properties, list(set(required_fields)), references
 
 def process_ref_or_schema(schema, openapi_spec):
     """Process a schema or $ref, returning its properties and required fields."""
@@ -70,26 +75,30 @@ def process_ref_or_schema(schema, openapi_spec):
         return ref_schema.get('properties', {}), ref_schema.get('required', [])
     return schema.get('properties', {}), schema.get('required', [])
 
-def process_properties(properties, required_fields, openapi_spec):
-    """Create XSD complexType elements based on OpenAPI properties."""
+def process_properties(properties, required_fields, references, openapi_spec):
+    """Create XSD complexType elements based on OpenAPI properties and references."""
     complex_type = ET.Element('xs:complexType')
     sequence = ET.SubElement(complex_type, 'xs:sequence')
 
+    # Add referenced elements first (for allOf $ref scenarios)
+    for ref_name in references:
+        sequence.append(ET.Element('xs:element', ref=ref_name))
+
     for prop_name, prop_details in properties.items():
         if 'allOf' in prop_details:
-            merged_properties, merged_required = merge_all_of_schemas(prop_details['allOf'], openapi_spec)
-            nested_complex_type = process_properties(merged_properties, merged_required, openapi_spec)
+            merged_properties, merged_required, merged_references = merge_all_of_schemas(prop_details['allOf'], openapi_spec)
+            nested_complex_type = process_properties(merged_properties, merged_required, merged_references, openapi_spec)
             sequence.append(create_xsd_element(prop_name, complex_type=nested_complex_type, required=True))
         elif 'anyOf' in prop_details:
             choice_type = ET.Element('xs:choice')
             for option in prop_details['anyOf']:
                 ref_properties, _ = process_ref_or_schema(option, openapi_spec)
-                nested_complex_type = process_properties(ref_properties, [], openapi_spec)
+                nested_complex_type = process_properties(ref_properties, [], [], openapi_spec)
                 choice_type.append(ET.Element('xs:element', type="xs:anyType") if not nested_complex_type else nested_complex_type)
             sequence.append(create_xsd_element(prop_name, complex_type=choice_type, required=True))
         elif '$ref' in prop_details:
             ref_name = prop_details['$ref'].split('/')[-1]
-            sequence.append(create_xsd_element(prop_name, ref=f'{ref_name}', required=True))
+            sequence.append(ET.Element('xs:element', ref=ref_name))
         else:
             process_simple_type(prop_name, prop_details, sequence, required_fields, openapi_spec)
 
@@ -116,7 +125,7 @@ def process_simple_type(prop_name, prop_details, sequence, required_fields, open
     elif yaml_type == 'object':
         nested_properties = prop_details.get('properties', {})
         nested_required = prop_details.get('required', [])
-        nested_complex_type = process_properties(nested_properties, nested_required, openapi_spec)
+        nested_complex_type = process_properties(nested_properties, nested_required, [], openapi_spec)
         sequence.append(create_xsd_element(prop_name, complex_type=nested_complex_type, required=is_required))
     else:
         xsd_type = yaml_type_to_xsd_type(yaml_type)
@@ -136,7 +145,8 @@ def generate_global_xsd_types(openapi_spec, root):
             complex_type = ET.SubElement(root, 'xs:complexType', name=schema_name)
             properties = schema_details.get('properties', {})
             required_fields = schema_details.get('required', [])
-            processed_complex_type = process_properties(properties, required_fields, openapi_spec)
+            _, _, references = merge_all_of_schemas(schema_details.get('allOf', []), openapi_spec)
+            processed_complex_type = process_properties(properties, required_fields, references, openapi_spec)
             complex_type.extend(processed_complex_type)
 
 def generate_xsd_from_openapi(openapi_spec):
