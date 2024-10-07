@@ -34,37 +34,50 @@ def create_xsd_element(element_name, element_type=None, required=False, is_array
     
     return elem
 
-def process_properties(properties, required_fields):
+def resolve_ref(ref_path, openapi_spec):
+    """Resolve a $ref path to its corresponding schema definition in the OpenAPI spec."""
+    ref_parts = ref_path.strip('#/').split('/')
+    ref_schema = openapi_spec
+    for part in ref_parts:
+        ref_schema = ref_schema.get(part, {})
+    return ref_schema
+
+def process_properties(properties, required_fields, openapi_spec):
     """Create XSD complexType elements based on OpenAPI properties."""
     complex_type = ET.Element('xs:complexType')
     sequence = ET.SubElement(complex_type, 'xs:sequence')
     
     for prop_name, prop_details in properties.items():
-        yaml_type = prop_details.get('type', 'string')
-        is_required = prop_name in required_fields
-        is_array = yaml_type == "array"
-
-        # Handle array types with nested items
-        if is_array:
-            items = prop_details.get('items', {})
-            item_type = items.get('type', 'object')
-            
-            if item_type == 'object':
-                nested_complex_type = process_properties(items.get('properties', {}), items.get('required', []))
-                sequence.append(create_xsd_element(prop_name, is_array=True, required=is_required, complex_type=nested_complex_type))
-            else:
-                item_xsd_type = yaml_type_to_xsd_type(item_type)
-                sequence.append(create_xsd_element(prop_name, element_type=item_xsd_type, required=is_required, is_array=True))
-
-        # Handle nested objects
-        elif yaml_type == 'object':
-            nested_complex_type = process_properties(prop_details.get('properties', {}), prop_details.get('required', []))
-            sequence.append(create_xsd_element(prop_name, complex_type=nested_complex_type, required=is_required))
-        
-        # Handle simple types
+        # Handle the case where the property is a reference
+        if '$ref' in prop_details:
+            ref_schema = resolve_ref(prop_details['$ref'], openapi_spec)
+            nested_complex_type = process_properties(ref_schema.get('properties', {}), ref_schema.get('required', []), openapi_spec)
+            sequence.append(create_xsd_element(prop_name, complex_type=nested_complex_type, required=True))
         else:
-            xsd_type = yaml_type_to_xsd_type(yaml_type)
-            sequence.append(create_xsd_element(prop_name, element_type=xsd_type, required=is_required))
+            yaml_type = prop_details.get('type', 'string')
+            is_required = prop_name in required_fields
+            is_array = yaml_type == "array"
+
+            # Handle array types with nested items
+            if is_array:
+                items = prop_details.get('items', {})
+                if '$ref' in items:
+                    ref_schema = resolve_ref(items['$ref'], openapi_spec)
+                    nested_complex_type = process_properties(ref_schema.get('properties', {}), ref_schema.get('required', []), openapi_spec)
+                    sequence.append(create_xsd_element(prop_name, is_array=True, required=is_required, complex_type=nested_complex_type))
+                else:
+                    item_type = yaml_type_to_xsd_type(items.get('type', 'string'))
+                    sequence.append(create_xsd_element(prop_name, element_type=item_type, required=is_required, is_array=True))
+
+            # Handle nested objects
+            elif yaml_type == 'object':
+                nested_complex_type = process_properties(prop_details.get('properties', {}), prop_details.get('required', []), openapi_spec)
+                sequence.append(create_xsd_element(prop_name, complex_type=nested_complex_type, required=is_required))
+            
+            # Handle simple types
+            else:
+                xsd_type = yaml_type_to_xsd_type(yaml_type)
+                sequence.append(create_xsd_element(prop_name, element_type=xsd_type, required=is_required))
     
     return complex_type
 
@@ -80,7 +93,7 @@ def generate_xsd_from_openapi(openapi_spec):
         required_fields = schema_details.get('required', [])
         
         # Create complexType for the schema
-        complex_type = process_properties(properties, required_fields)
+        complex_type = process_properties(properties, required_fields, openapi_spec)
         element.append(complex_type)
     
     # Pretty print the XML tree
