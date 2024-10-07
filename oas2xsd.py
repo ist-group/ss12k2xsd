@@ -93,8 +93,13 @@ def process_properties(properties, required_fields, openapi_spec):
         # Handle the case where the property is a reference
         elif '$ref' in prop_details:
             ref_schema = resolve_ref(prop_details['$ref'], openapi_spec)
-            nested_complex_type = process_properties(ref_schema.get('properties', {}), ref_schema.get('required', []), openapi_spec)
-            sequence.append(create_xsd_element(prop_name, complex_type=nested_complex_type, required=True))
+            if 'enum' in ref_schema and ref_schema.get('type') == 'string':
+                # Handle $ref that points to a string enum object
+                enum_values = ref_schema['enum']
+                sequence.append(create_xsd_element(prop_name, element_type='xs:string', required=True, enum_values=enum_values))
+            else:
+                nested_complex_type = process_properties(ref_schema.get('properties', {}), ref_schema.get('required', []), openapi_spec)
+                sequence.append(create_xsd_element(prop_name, complex_type=nested_complex_type, required=True))
 
         else:
             yaml_type = prop_details.get('type', 'string')
@@ -106,10 +111,18 @@ def process_properties(properties, required_fields, openapi_spec):
                 enum_values = prop_details['enum']
                 sequence.append(create_xsd_element(prop_name, element_type='xs:string', required=is_required, enum_values=enum_values))
 
-            # Handle array types with nested items, including objects
+            # Handle array types with items that are enums (arrays of string enums)
             elif is_array:
                 items = prop_details.get('items', {})
-                if '$ref' in items:
+                if items.get('type') == 'string' and 'enum' in items:
+                    # Create a simpleType restriction for each enum value in the array
+                    enum_values = items['enum']
+                    simple_type = ET.Element('xs:simpleType')
+                    restriction = ET.SubElement(simple_type, 'xs:restriction', base='xs:string')
+                    for value in enum_values:
+                        ET.SubElement(restriction, 'xs:enumeration', value=value)
+                    sequence.append(create_xsd_element(prop_name, is_array=True, required=is_required, complex_type=simple_type))
+                elif '$ref' in items:
                     ref_schema = resolve_ref(items['$ref'], openapi_spec)
                     nested_complex_type = process_properties(ref_schema.get('properties', {}), ref_schema.get('required', []), openapi_spec)
                     sequence.append(create_xsd_element(prop_name, is_array=True, required=is_required, complex_type=nested_complex_type))
