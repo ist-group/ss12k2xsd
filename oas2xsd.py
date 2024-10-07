@@ -1,6 +1,7 @@
 import sys
 import yaml
 import xml.etree.ElementTree as ET
+import argparse
 
 def yaml_type_to_xsd_type(yaml_type):
     """Map OpenAPI YAML types to XSD types."""
@@ -158,7 +159,7 @@ def generate_global_xsd_types(openapi_spec, root):
             processed_complex_type = process_properties(properties, required_fields, references, openapi_spec)
             complex_type.extend(processed_complex_type)
 
-def generate_xsd_from_openapi(openapi_spec):
+def generate_xsd_from_openapi(openapi_spec, output_stream):
     """Generate an XML Schema (XSD) from an OpenAPI YAML specification."""
     root = ET.Element('xs:schema', xmlns_xs="http://www.w3.org/2001/XMLSchema", elementFormDefault="qualified")
     
@@ -172,13 +173,32 @@ def generate_xsd_from_openapi(openapi_spec):
 
     tree = ET.ElementTree(root)
     ET.indent(tree, space="  ", level=0)
-    sys.stdout.write('<?xml version="1.0" encoding="UTF-8"?>\n')
-    tree.write(sys.stdout, encoding='unicode', method="xml")
+    output_stream.write('<?xml version="1.0" encoding="UTF-8"?>\n')
+    tree.write(output_stream, encoding='unicode', method="xml")
 
-def load_openapi_from_stdin():
-    """Load OpenAPI specification from stdin."""
-    return yaml.safe_load(sys.stdin.read())
+def load_openapi_from_file_or_stdin(input_file):
+    """Load OpenAPI specification from a file or stdin."""
+    if input_file:
+        with open(input_file, 'r') as file:
+            return yaml.safe_load(file)
+    else:
+        return yaml.safe_load(sys.stdin.read())
+
+def main():
+    parser = argparse.ArgumentParser(description='Convert OpenAPI to XSD.')
+    parser.add_argument('-i', '--input', help='Input file containing OpenAPI specification (defaults to stdin)')
+    parser.add_argument('-o', '--output', help='Output file for XSD schema (defaults to stdout)')
+    args = parser.parse_args()
+
+    # Load OpenAPI specification from file or stdin
+    openapi_spec = load_openapi_from_file_or_stdin(args.input)
+
+    # Open the output file or use stdout
+    if args.output:
+        with open(args.output, 'w') as output_file:
+            generate_xsd_from_openapi(openapi_spec, output_file)
+    else:
+        generate_xsd_from_openapi(openapi_spec, sys.stdout)
 
 if __name__ == "__main__":
-    openapi_spec = load_openapi_from_stdin()
-    generate_xsd_from_openapi(openapi_spec)
+    main()
