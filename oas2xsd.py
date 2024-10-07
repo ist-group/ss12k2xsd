@@ -89,7 +89,7 @@ def process_properties(properties, required_fields, openapi_spec):
             sequence.append(create_xsd_element(prop_name, complex_type=choice_type, required=True))
         elif '$ref' in prop_details:
             ref_name = prop_details['$ref'].split('/')[-1]
-            sequence.append(create_xsd_element(prop_name, ref=f'xs:{ref_name}', required=True))
+            sequence.append(create_xsd_element(prop_name, ref=f'{ref_name}', required=True))
         else:
             process_simple_type(prop_name, prop_details, sequence, required_fields, openapi_spec)
 
@@ -112,7 +112,7 @@ def process_simple_type(prop_name, prop_details, sequence, required_fields, open
             sequence.append(create_xsd_element(prop_name, is_array=True, required=is_required, complex_type=simple_type))
         elif '$ref' in items:
             ref_name = items['$ref'].split('/')[-1]
-            sequence.append(create_xsd_element(prop_name, is_array=True, required=is_required, ref=f'xs:{ref_name}'))
+            sequence.append(create_xsd_element(prop_name, is_array=True, required=is_required, ref=f'{ref_name}'))
     elif yaml_type == 'object':
         nested_properties = prop_details.get('properties', {})
         nested_required = prop_details.get('required', [])
@@ -123,26 +123,33 @@ def process_simple_type(prop_name, prop_details, sequence, required_fields, open
         sequence.append(create_xsd_element(prop_name, element_type=xsd_type, required=is_required))
 
 def generate_global_xsd_types(openapi_spec, root):
-    """Generate global complex types for each schema definition in the OpenAPI spec."""
+    """Generate global types for each schema, including enums and complex types."""
     schemas = openapi_spec.get('components', {}).get('schemas', {})
     for schema_name, schema_details in schemas.items():
-        complex_type = ET.SubElement(root, 'xs:complexType', name=schema_name)
-        properties = schema_details.get('properties', {})
-        required_fields = schema_details.get('required', [])
-        processed_complex_type = process_properties(properties, required_fields, openapi_spec)
-        complex_type.extend(processed_complex_type)
+        if schema_details.get('type') == 'string' and 'enum' in schema_details:
+            # Create a global enum type
+            simple_type = ET.SubElement(root, 'xs:simpleType', name=schema_name)
+            enum_restriction = create_enum_restriction('xs:string', schema_details['enum'])
+            simple_type.append(enum_restriction)
+        else:
+            # Create a global complex type
+            complex_type = ET.SubElement(root, 'xs:complexType', name=schema_name)
+            properties = schema_details.get('properties', {})
+            required_fields = schema_details.get('required', [])
+            processed_complex_type = process_properties(properties, required_fields, openapi_spec)
+            complex_type.extend(processed_complex_type)
 
 def generate_xsd_from_openapi(openapi_spec):
     """Generate an XML Schema (XSD) from an OpenAPI YAML specification."""
     root = ET.Element('xs:schema', xmlns_xs="http://www.w3.org/2001/XMLSchema", elementFormDefault="qualified")
     
-    # Generate global complex types for reusable definitions
+    # Generate global types for reusable definitions
     generate_global_xsd_types(openapi_spec, root)
 
     # Generate main elements that use references to global types
     schemas = openapi_spec.get('components', {}).get('schemas', {})
     for schema_name in schemas.keys():
-        ET.SubElement(root, 'xs:element', name=schema_name, type=f'xs:{schema_name}')
+        ET.SubElement(root, 'xs:element', name=schema_name, type=schema_name)
 
     tree = ET.ElementTree(root)
     ET.indent(tree, space="  ", level=0)
