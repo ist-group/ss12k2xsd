@@ -15,8 +15,11 @@ The intension of this tool is to help creating an XML version of the SS12000 spe
 
 ### Installing
 
-* Install or activate Python 3 environment
-* pip install -r requirements.txt
+```bash
+python3 -m venv .env
+pip install -r requirements.txt
+source .env/bin/activate
+```
 
 ### Executing program
 
