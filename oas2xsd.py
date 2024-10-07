@@ -53,15 +53,23 @@ def merge_all_of_schemas(all_of_list, openapi_spec):
     merged_properties = {}
     required_fields = []
     for schema in all_of_list:
+        # Handle $ref within allOf
         if '$ref' in schema:
             ref_schema = resolve_ref(schema['$ref'], openapi_spec)
-            properties = ref_schema.get('properties', {})
-            required = ref_schema.get('required', [])
+            if 'enum' in ref_schema and ref_schema.get('type') == 'string':
+                # Handle $ref that points to a string enum object
+                properties = {schema['$ref']: {'type': 'string', 'enum': ref_schema['enum']}}
+                required = []
+            else:
+                properties = ref_schema.get('properties', {})
+                required = ref_schema.get('required', [])
         else:
             properties = schema.get('properties', {})
             required = schema.get('required', [])
+        
         merged_properties.update(properties)
         required_fields.extend(required)
+    
     return merged_properties, list(set(required_fields))  # Remove duplicates from required fields
 
 def process_properties(properties, required_fields, openapi_spec):
