@@ -7,6 +7,9 @@ import os
 class OpenAPIToXSDConverter:
     def __init__(self, openapi_spec):
         self.openapi_spec = openapi_spec
+        self.global_types = {}  # Store globally defined types
+        self.type_names = set()  # Keep track of type names to avoid duplicates
+        self.anonymous_type_count = 0  # Counter for anonymous types
 
     def yaml_type_to_xsd_type(self, yaml_type):
         """Map OpenAPI YAML scalar types to XSD types."""
@@ -38,7 +41,8 @@ class OpenAPIToXSDConverter:
         if ref:
             element.set('ref', ref)
         elif enum_values:
-            element.append(self.create_enum_restriction(element_type, enum_values))
+            simple_type = self.create_enum_restriction(element_type, enum_values)
+            element.append(simple_type)
         elif complex_type is not None:
             element.append(complex_type)
         elif element_type:
@@ -102,6 +106,61 @@ class OpenAPIToXSDConverter:
         exclusive_request_body_types = request_body_types - used_types
         return exclusive_request_body_types
 
+    def collect_all_types(self):
+        """Collect all types from the OpenAPI spec and assign unique names."""
+        self.global_types = {}
+        self.type_names = set()
+        schemas = self.openapi_spec.get('components', {}).get('schemas', {})
+        # Collect top-level schemas
+        for schema_name, schema in schemas.items():
+            self.global_types[schema_name] = schema
+            self.type_names.add(schema_name)
+        # Collect nested schemas
+        for schema in schemas.values():
+            self.collect_nested_types(schema)
+
+    def collect_nested_types(self, schema):
+        """Recursively collect nested types."""
+        if schema.get('type') == 'object':
+            properties = schema.get('properties', {})
+            for prop_name, prop in properties.items():
+                if '$ref' in prop:
+                    # Already handled via $ref
+                    continue
+                elif prop.get('type') == 'object':
+                    # Assign a unique name for the nested object
+                    type_name = self.get_unique_type_name(prop_name)
+                    self.global_types[type_name] = prop
+                    self.type_names.add(type_name)
+                    # Replace the property definition with a $ref
+                    prop.clear()
+                    prop['$ref'] = f"#/components/schemas/{type_name}"
+                    # Recursively collect nested types
+                    self.collect_nested_types(self.global_types[type_name])
+                elif prop.get('type') == 'array':
+                    items = prop.get('items', {})
+                    if '$ref' in items:
+                        continue
+                    elif items.get('type') == 'object':
+                        # Assign a unique name for the array items type
+                        type_name = self.get_unique_type_name(prop_name + 'Item')
+                        self.global_types[type_name] = items
+                        self.type_names.add(type_name)
+                        # Replace the items definition with a $ref
+                        items.clear()
+                        items['$ref'] = f"#/components/schemas/{type_name}"
+                        # Recursively collect nested types
+                        self.collect_nested_types(self.global_types[type_name])
+
+    def get_unique_type_name(self, base_name):
+        """Generate a unique type name based on base_name."""
+        type_name = base_name
+        index = 1
+        while type_name in self.type_names:
+            type_name = f"{base_name}_{index}"
+            index += 1
+        return type_name
+
     def merge_all_of_schemas(self, all_of_list):
         """Merge multiple schemas defined in an allOf list into a single schema."""
         merged_properties = {}
@@ -142,7 +201,40 @@ class OpenAPIToXSDConverter:
                 if '$ref' in prop:
                     ref_name = prop['$ref'].split('/')[-1]
                     references.append(ref_name)
+                elif prop.get('type') == 'object':
+                    # Nested object, process it
+                    type_name = self.get_type_name_for_schema(prop)
+                    prop['$ref'] = f"#/components/schemas/{type_name}"
+                    references.append(type_name)
+                    self.global_types[type_name] = prop
+                    self.type_names.add(type_name)
+                    self.collect_nested_types(prop)
+                elif prop.get('type') == 'array':
+                    items = prop.get('items', {})
+                    if '$ref' in items:
+                        ref_name = items['$ref'].split('/')[-1]
+                        references.append(ref_name)
+                    elif items.get('type') == 'object':
+                        # Nested object in array, process it
+                        type_name = self.get_type_name_for_schema(items)
+                        items['$ref'] = f"#/components/schemas/{type_name}"
+                        references.append(type_name)
+                        self.global_types[type_name] = items
+                        self.type_names.add(type_name)
+                        self.collect_nested_types(items)
         return properties, required_fields, references
+
+    def get_type_name_for_schema(self, schema):
+        """Get or assign a type name for a schema."""
+        if 'title' in schema:
+            type_name = schema['title']
+        else:
+            self.anonymous_type_count += 1
+            type_name = f"AnonymousType_{self.anonymous_type_count}"
+        while type_name in self.type_names:
+            self.anonymous_type_count += 1
+            type_name = f"AnonymousType_{self.anonymous_type_count}"
+        return type_name
 
     def process_properties(self, properties, required_fields, references):
         """Create XSD complexType elements based on OpenAPI properties and references."""
@@ -162,7 +254,7 @@ class OpenAPIToXSDConverter:
                 self.process_any_of(prop_name, prop_details, sequence_elem)
             elif '$ref' in prop_details:
                 ref_name = prop_details['$ref'].split('/')[-1]
-                element = ET.Element('xs:element', name=prop_name, ref=ref_name)
+                element = self.create_xsd_element(prop_name, ref=ref_name, required=(prop_name in required_fields))
                 sequence_elem.append(element)
             else:
                 self.process_simple_type(prop_name, prop_details, sequence_elem, required_fields)
@@ -190,27 +282,42 @@ class OpenAPIToXSDConverter:
 
         if yaml_type == 'array':
             items = prop_details.get('items', {})
-            if items.get('type') == 'string' and 'enum' in items:
+            if '$ref' in items:
+                ref_name = items['$ref'].split('/')[-1]
+                element = self.create_xsd_element(prop_name, ref=ref_name, required=is_required, is_array=True)
+                sequence_elem.append(element)
+            elif items.get('type') == 'object':
+                # Process the object and create a global type
+                type_name = self.get_type_name_for_schema(items)
+                items['$ref'] = f"#/components/schemas/{type_name}"
+                self.global_types[type_name] = items
+                self.type_names.add(type_name)
+                self.collect_nested_types(items)
+                element = self.create_xsd_element(prop_name, ref=type_name, required=is_required, is_array=True)
+                sequence_elem.append(element)
+            elif items.get('type') == 'string' and 'enum' in items:
                 enum_values = items['enum']
                 simple_type = self.create_enum_restriction('xs:string', enum_values)
                 sequence_elem.append(self.create_xsd_element(
                     prop_name, is_array=True, required=is_required, complex_type=simple_type))
-            elif '$ref' in items:
-                ref_name = items['$ref'].split('/')[-1]
-                element = ET.Element('xs:element', name=prop_name, ref=ref_name)
-                element.set('maxOccurs', 'unbounded')
-                element.set('minOccurs', '1' if is_required else '0')
-                sequence_elem.append(element)
             else:
                 item_type = self.yaml_type_to_xsd_type(items.get('type', 'string'))
                 sequence_elem.append(self.create_xsd_element(
                     prop_name, element_type=item_type, required=is_required, is_array=True))
         elif yaml_type == 'object':
-            nested_props = prop_details.get('properties', {})
-            nested_required = prop_details.get('required', [])
-            nested_complex_type = self.process_properties(nested_props, nested_required, [])
-            sequence_elem.append(self.create_xsd_element(
-                prop_name, complex_type=nested_complex_type, required=is_required))
+            if '$ref' in prop_details:
+                ref_name = prop_details['$ref'].split('/')[-1]
+                element = self.create_xsd_element(prop_name, ref=ref_name, required=is_required)
+                sequence_elem.append(element)
+            else:
+                # Process the object and create a global type
+                type_name = self.get_type_name_for_schema(prop_details)
+                prop_details['$ref'] = f"#/components/schemas/{type_name}"
+                self.global_types[type_name] = prop_details
+                self.type_names.add(type_name)
+                self.collect_nested_types(prop_details)
+                element = self.create_xsd_element(prop_name, ref=type_name, required=is_required)
+                sequence_elem.append(element)
         elif yaml_type == 'string' and 'enum' in prop_details:
             enum_values = prop_details['enum']
             sequence_elem.append(self.create_xsd_element(
@@ -222,19 +329,21 @@ class OpenAPIToXSDConverter:
 
     def generate_global_xsd_types(self, root, exclude_types):
         """Generate global types for each schema, excluding specified types."""
-        schemas = self.openapi_spec.get('components', {}).get('schemas', {})
-        for schema_name, schema_details in schemas.items():
-            if schema_name in exclude_types:
+        # Ensure all types are collected
+        self.collect_all_types()
+
+        for type_name, schema_details in self.global_types.items():
+            if type_name in exclude_types:
                 continue  # Skip excluded types
 
             if schema_details.get('type') == 'string' and 'enum' in schema_details:
                 # Create a global enum type
-                simple_type = ET.SubElement(root, 'xs:simpleType', name=schema_name)
+                simple_type = ET.SubElement(root, 'xs:simpleType', name=type_name)
                 enum_restriction = self.create_enum_restriction('xs:string', schema_details['enum'])
                 simple_type.append(enum_restriction)
-            else:
+            elif schema_details.get('type') == 'object' or 'properties' in schema_details:
                 # Create a global complex type
-                complex_type_elem = ET.SubElement(root, 'xs:complexType', name=schema_name)
+                complex_type_elem = ET.SubElement(root, 'xs:complexType', name=type_name)
                 properties = schema_details.get('properties', {})
                 required_fields = schema_details.get('required', [])
                 references = []
@@ -250,6 +359,10 @@ class OpenAPIToXSDConverter:
 
                 processed_complex_type = self.process_properties(properties, required_fields, references)
                 complex_type_elem.extend(processed_complex_type)
+            else:
+                # Handle other types as simple types
+                xsd_type = self.yaml_type_to_xsd_type(schema_details.get('type', 'string'))
+                ET.SubElement(root, 'xs:simpleType', name=type_name, base=xsd_type)
 
     def generate_xsd(self, output_stream, exclude_request_body_types, exclude_list):
         """Generate an XML Schema (XSD) from an OpenAPI YAML specification."""
@@ -267,10 +380,9 @@ class OpenAPIToXSDConverter:
         self.generate_global_xsd_types(root, exclude_types)
 
         # Generate main elements
-        schemas = self.openapi_spec.get('components', {}).get('schemas', {})
-        for schema_name in schemas.keys():
-            if schema_name not in exclude_types:
-                ET.SubElement(root, 'xs:element', name=schema_name, type=schema_name)
+        for type_name in self.global_types.keys():
+            if type_name not in exclude_types:
+                ET.SubElement(root, 'xs:element', name=type_name, type=type_name)
 
         tree = ET.ElementTree(root)
         ET.indent(tree, space="  ", level=0)
