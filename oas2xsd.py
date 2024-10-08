@@ -2,6 +2,7 @@ import sys
 import yaml
 import xml.etree.ElementTree as ET
 import argparse
+import os
 
 def yaml_type_to_xsd_type(yaml_type):
     """Map OpenAPI YAML types to XSD types."""
@@ -162,11 +163,11 @@ def process_simple_type(prop_name, prop_details, sequence, required_fields, open
         sequence.append(create_xsd_element(prop_name, element_type=xsd_type, required=is_required))
 
 def generate_global_xsd_types(openapi_spec, root, exclude_types):
-    """Generate global types for each schema, excluding request body-only types."""
+    """Generate global types for each schema, excluding request body-only types and excluded objects."""
     schemas = openapi_spec.get('components', {}).get('schemas', {})
     for schema_name, schema_details in schemas.items():
         if schema_name in exclude_types:
-            continue  # Skip types used only in request bodies
+            continue  # Skip types that are either request body-only or excluded
 
         if schema_details.get('type') == 'string' and 'enum' in schema_details:
             # Create a global enum type
@@ -182,18 +183,19 @@ def generate_global_xsd_types(openapi_spec, root, exclude_types):
             processed_complex_type = process_properties(properties, required_fields, references, openapi_spec)
             complex_type.extend(processed_complex_type)
 
-def generate_xsd_from_openapi(openapi_spec, output_stream, exclude_request_body_types):
+def generate_xsd_from_openapi(openapi_spec, output_stream, exclude_request_body_types, exclude_list):
     """Generate an XML Schema (XSD) from an OpenAPI YAML specification."""
     request_body_only_types = find_request_body_only_types(openapi_spec) if exclude_request_body_types else set()
+    exclude_types = request_body_only_types.union(exclude_list)
     root = ET.Element('xs:schema', xmlns_xs="http://www.w3.org/2001/XMLSchema", elementFormDefault="qualified")
     
-    # Generate global types for reusable definitions, excluding request body-only types if specified
-    generate_global_xsd_types(openapi_spec, root, request_body_only_types)
+    # Generate global types for reusable definitions, excluding request body-only types and excluded types
+    generate_global_xsd_types(openapi_spec, root, exclude_types)
 
     # Generate main elements that use references to global types
     schemas = openapi_spec.get('components', {}).get('schemas', {})
     for schema_name in schemas.keys():
-        if schema_name not in request_body_only_types:
+        if schema_name not in exclude_types:
             ET.SubElement(root, 'xs:element', name=schema_name, type=schema_name)
 
     tree = ET.ElementTree(root)
@@ -209,22 +211,34 @@ def load_openapi_from_file_or_stdin(input_file):
     else:
         return yaml.safe_load(sys.stdin.read())
 
+def load_exclude_list(exclude_input):
+    """Load the exclude list from a file or a comma-separated list."""
+    if os.path.isfile(exclude_input):
+        with open(exclude_input, 'r') as file:
+            return set(line.strip() for line in file if line.strip())
+    else:
+        return set(exclude_input.split(','))
+
 def main():
     parser = argparse.ArgumentParser(description='Convert OpenAPI to XSD.')
     parser.add_argument('-i', '--input', help='Input file containing OpenAPI specification (defaults to stdin)')
     parser.add_argument('-o', '--output', help='Output file for XSD schema (defaults to stdout)')
     parser.add_argument('--exclude-request-body-types', action='store_true', help='Exclude types used only in request bodies from the XSD')
+    parser.add_argument('--exclude', help='Comma-separated list of object names or a file containing object names to exclude from the schema')
     args = parser.parse_args()
 
     # Load OpenAPI specification from file or stdin
     openapi_spec = load_openapi_from_file_or_stdin(args.input)
 
+    # Load the exclude list from either a file or a comma-separated list
+    exclude_list = load_exclude_list(args.exclude) if args.exclude else set()
+
     # Open the output file or use stdout
     if args.output:
         with open(args.output, 'w') as output_file:
-            generate_xsd_from_openapi(openapi_spec, output_file, args.exclude_request_body_types)
+            generate_xsd_from_openapi(openapi_spec, output_file, args.exclude_request_body_types, exclude_list)
     else:
-        generate_xsd_from_openapi(openapi_spec, sys.stdout, args.exclude_request_body_types)
+        generate_xsd_from_openapi(openapi_spec, sys.stdout, args.exclude_request_body_types, exclude_list)
 
 if __name__ == "__main__":
     main()
