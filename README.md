@@ -24,6 +24,24 @@ source .env/bin/activate
 ### Executing program
 
 ```bash
+usage: oas2xsd.py [-h] [-i INPUT] [-o OUTPUT] [--exclude-request-body-types] [--exclude EXCLUDE]
+
+Convert OpenAPI to XSD.
+
+options:
+  -h, --help            show this help message and exit
+  -i INPUT, --input INPUT
+                        Input file containing OpenAPI specification (defaults to stdin)
+  -o OUTPUT, --output OUTPUT
+                        Output file for XSD schema (defaults to stdout)
+  --exclude-request-body-types
+                        Exclude types used only in request bodies from the XSD
+  --exclude EXCLUDE     Comma-separated list of object names or a file containing object names to exclude from the schema
+```
+
+Example:
+
+```bash
 cat openapi_ss12000_version2_1_0.yaml | python3 oas2xsd.py > ss12000_version2_1.0.xsd
 ```
 
