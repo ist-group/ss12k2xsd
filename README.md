@@ -42,7 +42,7 @@ options:
 Example:
 
 ```bash
-cat openapi_ss12000_version2_1_0.yaml | python3 oas2xsd.py > ss12000_version2_1.0.xsd
+cat openapi_ss12000_version2_1_0.yaml | oas2xsd.py > ss12000_version2_1.0.xsd
 ```
 
 ## Version History
