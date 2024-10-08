@@ -50,6 +50,26 @@ def resolve_ref(ref_path, openapi_spec):
         ref_schema = ref_schema.get(part, {})
     return ref_schema
 
+def find_request_body_only_types(openapi_spec):
+    """Find types used exclusively in request bodies."""
+    request_body_types = set()
+    schemas = openapi_spec.get('components', {}).get('schemas', {}).keys()
+
+    # Traverse paths to identify schemas used in request bodies
+    paths = openapi_spec.get('paths', {})
+    for path_data in paths.values():
+        for method_data in path_data.values():
+            request_body = method_data.get('requestBody', {})
+            content = request_body.get('content', {})
+            for media_type_data in content.values():
+                schema_ref = media_type_data.get('schema', {}).get('$ref')
+                if schema_ref:
+                    schema_name = schema_ref.split('/')[-1]
+                    if schema_name in schemas:
+                        request_body_types.add(schema_name)
+
+    return request_body_types
+
 def merge_all_of_schemas(all_of_list, openapi_spec):
     """Merge multiple schemas defined in an allOf list into a single schema."""
     merged_properties = {}
@@ -131,7 +151,6 @@ def process_simple_type(prop_name, prop_details, sequence, required_fields, open
             sequence.append(create_xsd_element(prop_name, is_array=True, required=is_required, complex_type=simple_type))
         elif '$ref' in items:
             ref_name = items['$ref'].split('/')[-1]
-            # Correctly handle arrays of references using the `ref` attribute and `maxOccurs="unbounded"`
             sequence.append(ET.Element('xs:element', ref=ref_name, maxOccurs="unbounded"))
     elif yaml_type == 'object':
         nested_properties = prop_details.get('properties', {})
@@ -142,10 +161,13 @@ def process_simple_type(prop_name, prop_details, sequence, required_fields, open
         xsd_type = yaml_type_to_xsd_type(yaml_type)
         sequence.append(create_xsd_element(prop_name, element_type=xsd_type, required=is_required))
 
-def generate_global_xsd_types(openapi_spec, root):
-    """Generate global types for each schema, including enums and complex types."""
+def generate_global_xsd_types(openapi_spec, root, exclude_types):
+    """Generate global types for each schema, excluding request body-only types."""
     schemas = openapi_spec.get('components', {}).get('schemas', {})
     for schema_name, schema_details in schemas.items():
+        if schema_name in exclude_types:
+            continue  # Skip types used only in request bodies
+
         if schema_details.get('type') == 'string' and 'enum' in schema_details:
             # Create a global enum type
             simple_type = ET.SubElement(root, 'xs:simpleType', name=schema_name)
@@ -160,17 +182,19 @@ def generate_global_xsd_types(openapi_spec, root):
             processed_complex_type = process_properties(properties, required_fields, references, openapi_spec)
             complex_type.extend(processed_complex_type)
 
-def generate_xsd_from_openapi(openapi_spec, output_stream):
+def generate_xsd_from_openapi(openapi_spec, output_stream, exclude_request_body_types):
     """Generate an XML Schema (XSD) from an OpenAPI YAML specification."""
+    request_body_only_types = find_request_body_only_types(openapi_spec) if exclude_request_body_types else set()
     root = ET.Element('xs:schema', xmlns_xs="http://www.w3.org/2001/XMLSchema", elementFormDefault="qualified")
     
-    # Generate global types for reusable definitions
-    generate_global_xsd_types(openapi_spec, root)
+    # Generate global types for reusable definitions, excluding request body-only types if specified
+    generate_global_xsd_types(openapi_spec, root, request_body_only_types)
 
     # Generate main elements that use references to global types
     schemas = openapi_spec.get('components', {}).get('schemas', {})
     for schema_name in schemas.keys():
-        ET.SubElement(root, 'xs:element', name=schema_name, type=schema_name)
+        if schema_name not in request_body_only_types:
+            ET.SubElement(root, 'xs:element', name=schema_name, type=schema_name)
 
     tree = ET.ElementTree(root)
     ET.indent(tree, space="  ", level=0)
@@ -189,6 +213,7 @@ def main():
     parser = argparse.ArgumentParser(description='Convert OpenAPI to XSD.')
     parser.add_argument('-i', '--input', help='Input file containing OpenAPI specification (defaults to stdin)')
     parser.add_argument('-o', '--output', help='Output file for XSD schema (defaults to stdout)')
+    parser.add_argument('--exclude-request-body-types', action='store_true', help='Exclude types used only in request bodies from the XSD')
     args = parser.parse_args()
 
     # Load OpenAPI specification from file or stdin
@@ -197,9 +222,9 @@ def main():
     # Open the output file or use stdout
     if args.output:
         with open(args.output, 'w') as output_file:
-            generate_xsd_from_openapi(openapi_spec, output_file)
+            generate_xsd_from_openapi(openapi_spec, output_file, args.exclude_request_body_types)
     else:
-        generate_xsd_from_openapi(openapi_spec, sys.stdout)
+        generate_xsd_from_openapi(openapi_spec, sys.stdout, args.exclude_request_body_types)
 
 if __name__ == "__main__":
     main()
