@@ -36,6 +36,7 @@ options:
                         Output file for XSD schema (defaults to stdout)
   --exclude-request-body-types
                         Exclude types used only in request bodies from the XSD
+  --include INCLUDE     If provided, only those listed types are included in the schema, overriding any request-body-only or exclude logic.
   --exclude EXCLUDE     Comma-separated list of object names or a file containing object names to exclude from the schema
 ```
 
