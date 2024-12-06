@@ -27,20 +27,21 @@ def create_enum_restriction(element_type, enum_values):
     simple_type.append(restriction)
     return simple_type
 
-def create_xsd_element(element_name, element_type=None, required=False, is_array=False, complex_type=None, enum_values=None, ref=None):
-    """Create an XML Schema element."""
+def create_xsd_element(element_name, element_type=None, required=False, is_array=False, complex_type=None, enum_values=None):
+    """Create an XML Schema element using type (not ref)."""
     elem = ET.Element('xs:element', name=element_name)
     elem.set("minOccurs", "1" if required else "0")
     if is_array:
         elem.set("maxOccurs", "unbounded")
 
-    if ref:
-        elem.set('ref', ref)
-    elif enum_values:
+    if enum_values:
+        # Inline enum simpleType
         elem.append(create_enum_restriction(element_type, enum_values))
     elif complex_type is not None:
+        # Inline complex type
         elem.append(complex_type)
     else:
+        # Use a global type
         elem.set('type', element_type)
     
     return elem
@@ -73,7 +74,7 @@ def find_request_body_only_types(openapi_spec):
     return request_body_types
 
 def merge_all_of_schemas(all_of_list, openapi_spec):
-    """Merge multiple schemas defined in allOf into a single schema."""
+    """Merge multiple schemas defined in an allOf list into a single schema."""
     merged_properties = {}
     required_fields = []
     references = []
@@ -90,7 +91,7 @@ def merge_all_of_schemas(all_of_list, openapi_spec):
     return merged_properties, list(set(required_fields)), references
 
 def process_ref_or_schema(schema, openapi_spec):
-    """Process a schema or $ref, returning properties and required fields."""
+    """Process a schema or $ref, returning its properties and required fields."""
     if '$ref' in schema:
         ref_schema = resolve_ref(schema['$ref'], openapi_spec)
         if 'allOf' in ref_schema:
@@ -99,79 +100,94 @@ def process_ref_or_schema(schema, openapi_spec):
     return schema.get('properties', {}), schema.get('required', [])
 
 def process_properties(properties, required_fields, references, openapi_spec):
-    """Create XSD complexType elements based on properties and references."""
+    """Create XSD complexType elements based on OpenAPI properties and references using type attributes."""
     complex_type = ET.Element('xs:complexType')
     sequence = ET.SubElement(complex_type, 'xs:sequence')
 
-    # Handle referenced elements from allOf
-    for ref_name in references:
-        sequence.append(ET.Element('xs:element', ref=ref_name))
+    # Previously used ref for these references, now we must incorporate them by type.
+    # For references from allOf, we have references that represent merged schemas.
+    # However, these references do not directly produce elements here; they are merged.
+    # If needed, we could create elements referencing their types. But since allOf merges schemas,
+    # the references typically become part of the merged properties.
 
     for prop_name, prop_details in properties.items():
         if 'allOf' in prop_details:
             merged_properties, merged_required, merged_references = merge_all_of_schemas(prop_details['allOf'], openapi_spec)
             nested_complex_type = process_properties(merged_properties, merged_required, merged_references, openapi_spec)
-            sequence.append(create_xsd_element(prop_name, complex_type=nested_complex_type, required=True))
+            sequence.append(create_xsd_element(prop_name, required=True, complex_type=nested_complex_type))
         elif 'anyOf' in prop_details:
             process_any_of(prop_name, prop_details, sequence, openapi_spec)
         elif '$ref' in prop_details:
+            # Instead of ref, use type
             ref_name = prop_details['$ref'].split('/')[-1]
-            sequence.append(ET.Element('xs:element', ref=ref_name))
+            # The referenced schema_name is a global type name
+            # So we create an element with name=prop_name and type=ref_name
+            sequence.append(ET.Element('xs:element', name=prop_name, type=ref_name, minOccurs="1"))
         else:
             process_simple_type(prop_name, prop_details, sequence, required_fields, openapi_spec)
 
     return complex_type
 
 def process_any_of(prop_name, prop_details, sequence, openapi_spec):
-    """Process anyOf construct in OpenAPI properties."""
+    """Process anyOf construct by using a choice. Each option gets its own element with a unique name and a type."""
     choice_element = ET.Element('xs:choice')
-    for option in prop_details['anyOf']:
+    anyof_options = prop_details['anyOf']
+
+    for i, option in enumerate(anyof_options):
+        option_element_name = f"{prop_name}_option{i}"
         if '$ref' in option:
             ref_name = option['$ref'].split('/')[-1]
-            choice_element.append(ET.Element('xs:element', ref=ref_name))
+            # Use type reference
+            ET.SubElement(choice_element, 'xs:element', name=option_element_name, type=ref_name, minOccurs="1")
         else:
             yaml_type = option.get('type', 'string')
             xsd_type = yaml_type_to_xsd_type(yaml_type)
-            choice_element.append(ET.Element('xs:element', type=xsd_type))
-    sequence.append(create_xsd_element(prop_name, complex_type=choice_element, required=True))
+            ET.SubElement(choice_element, 'xs:element', name=option_element_name, type=xsd_type, minOccurs="1")
+
+    sequence.append(create_xsd_element(prop_name, required=True, complex_type=choice_element))
 
 def process_simple_type(prop_name, prop_details, sequence, required_fields, openapi_spec):
-    """Process simple types, enums, and arrays in properties."""
+    """Process simple types, enums, arrays, and objects using type references instead of ref."""
     yaml_type = prop_details.get('type', 'string')
     is_required = prop_name in required_fields
-    is_array = yaml_type == "array"
 
     if yaml_type == 'string' and 'enum' in prop_details:
         enum_values = prop_details['enum']
-        sequence.append(create_xsd_element(prop_name, element_type='xs:string', required=is_required, enum_values=enum_values))
-    elif is_array:
+        # Inline enum simpleType
+        sequence.append(create_xsd_element(prop_name, required=is_required, element_type='xs:string', enum_values=enum_values))
+    elif yaml_type == 'array':
         items = prop_details.get('items', {})
         if items.get('type') == 'string' and 'enum' in items:
             enum_values = items['enum']
             simple_type = create_enum_restriction('xs:string', enum_values)
-            sequence.append(create_xsd_element(prop_name, is_array=True, required=is_required, complex_type=simple_type))
+            elem = create_xsd_element(prop_name, required=is_required, is_array=True, complex_type=simple_type)
+            sequence.append(elem)
         elif '$ref' in items:
             ref_name = items['$ref'].split('/')[-1]
-            sequence.append(ET.Element('xs:element', ref=ref_name, maxOccurs="unbounded"))
+            # Arrays referencing a type
+            sequence.append(ET.Element('xs:element', name=prop_name, type=ref_name, minOccurs="1", maxOccurs="unbounded"))
+        else:
+            item_type = yaml_type_to_xsd_type(items.get('type', 'string'))
+            sequence.append(create_xsd_element(prop_name, required=is_required, is_array=True, element_type=item_type))
     elif yaml_type == 'object':
+        # Nested object
         nested_properties = prop_details.get('properties', {})
         nested_required = prop_details.get('required', [])
         nested_complex_type = process_properties(nested_properties, nested_required, [], openapi_spec)
-        sequence.append(create_xsd_element(prop_name, complex_type=nested_complex_type, required=is_required))
+        sequence.append(create_xsd_element(prop_name, required=is_required, complex_type=nested_complex_type))
     else:
         xsd_type = yaml_type_to_xsd_type(yaml_type)
-        sequence.append(create_xsd_element(prop_name, element_type=xsd_type, required=is_required))
+        sequence.append(create_xsd_element(prop_name, required=is_required, element_type=xsd_type))
 
 def generate_global_xsd_types(openapi_spec, root, exclude_types, include_types):
-    """Generate global types, factoring in exclude and include sets."""
+    """Generate global types for each schema, only using type references, and respecting include/exclude sets."""
     schemas = openapi_spec.get('components', {}).get('schemas', {})
-
     # If include_types is specified, only process those in include_types
     schema_names_to_process = include_types if include_types else schemas.keys()
 
     for schema_name in schema_names_to_process:
         if schema_name not in schemas:
-            continue  # Type not defined in schemas
+            continue
         if schema_name in exclude_types:
             continue
 
@@ -191,23 +207,22 @@ def generate_global_xsd_types(openapi_spec, root, exclude_types, include_types):
             complex_type.extend(processed_complex_type)
 
 def generate_xsd_from_openapi(openapi_spec, output_stream, exclude_request_body_types, exclude_list, include_list):
-    """Generate an XML Schema (XSD) from an OpenAPI YAML specification."""
+    """Generate an XML Schema (XSD) from an OpenAPI YAML specification using type instead of ref."""
     if include_list:
         # If include is specified, only generate those included types, ignoring request-body and exclude logic
         exclude_types = set()
-        request_body_only_types = set()
     else:
         request_body_only_types = find_request_body_only_types(openapi_spec) if exclude_request_body_types else set()
         exclude_types = request_body_only_types.union(exclude_list)
 
     root = ET.Element('xs:schema', xmlns_xs="http://www.w3.org/2001/XMLSchema", elementFormDefault="qualified")
-    
+
     # Generate global types
     generate_global_xsd_types(openapi_spec, root, exclude_types, include_list)
 
     schemas = openapi_spec.get('components', {}).get('schemas', {})
     if include_list:
-        # Only include listed types
+        # Only include listed types as top-level elements
         for schema_name in include_list:
             if schema_name in schemas and schema_name not in exclude_types:
                 ET.SubElement(root, 'xs:element', name=schema_name, type=schema_name)
@@ -241,7 +256,7 @@ def load_list_from_input(input_value):
         return set(input_value.split(','))
 
 def main():
-    parser = argparse.ArgumentParser(description='Convert OpenAPI to XSD.')
+    parser = argparse.ArgumentParser(description='Convert OpenAPI to XSD using type instead of ref for references.')
     parser.add_argument('-i', '--input', help='Input file containing OpenAPI specification (defaults to stdin)')
     parser.add_argument('-o', '--output', help='Output file for XSD schema (defaults to stdout)')
     parser.add_argument('--exclude-request-body-types', action='store_true', help='Exclude types used only in request bodies from the XSD')
