@@ -38,12 +38,13 @@ options:
                         Exclude types used only in request bodies from the XSD
   --include INCLUDE     If provided, only those listed types are included in the schema, overriding any request-body-only or exclude logic.
   --exclude EXCLUDE     Comma-separated list of object names or a file containing object names to exclude from the schema
+  --expand inlines the specified types wherever they are referenced, instead of referencing them by type.
 ```
 
 Example:
 
 ```bash
-cat openapi_ss12000_version2_1_0.yaml | oas2xsd.py > ss12000_version2_1.0.xsd
+python script.py -i openapi_ss12000_version2_1_0.yaml -o openapi.xsd --include include_list.txt --expand expand_list.txt
 ```
 
 ## Version History
